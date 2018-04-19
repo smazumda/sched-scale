@@ -6239,94 +6239,6 @@ static inline int find_idlest_cpu(struct sched_domain *sd, struct task_struct *p
 
 #ifdef CONFIG_SCHED_SMT
 
-static inline void set_idle_cores(int cpu, int val)
-{
-	struct sched_domain_shared *sds;
-
-	sds = rcu_dereference(per_cpu(sd_llc_shared, cpu));
-	if (sds)
-		WRITE_ONCE(sds->has_idle_cores, val);
-}
-
-static inline bool test_idle_cores(int cpu, bool def)
-{
-	struct sched_domain_shared *sds;
-
-	sds = rcu_dereference(per_cpu(sd_llc_shared, cpu));
-	if (sds)
-		return READ_ONCE(sds->has_idle_cores);
-
-	return def;
-}
-
-/*
- * Scans the local SMT mask to see if the entire core is idle, and records this
- * information in sd_llc_shared->has_idle_cores.
- *
- * Since SMT siblings share all cache levels, inspecting this limited remote
- * state should be fairly cheap.
- */
-void __update_idle_core(struct rq *rq)
-{
-	int core = cpu_of(rq);
-	int cpu;
-
-	rcu_read_lock();
-	if (test_idle_cores(core, true))
-		goto unlock;
-
-	for_each_cpu(cpu, cpu_smt_mask(core)) {
-		if (cpu == core)
-			continue;
-
-		if (!idle_cpu(cpu))
-			goto unlock;
-	}
-
-	set_idle_cores(core, 1);
-unlock:
-	rcu_read_unlock();
-}
-
-/*
- * Scan the entire LLC domain for idle cores; this dynamically switches off if
- * there are no idle cores left in the system; tracked through
- * sd_llc->shared->has_idle_cores and enabled through update_idle_core() above.
- */
-static int select_idle_core(struct task_struct *p, struct sched_domain *sd, int target)
-{
-	struct cpumask *cpus = this_cpu_cpumask_var_ptr(select_idle_mask);
-	int core, cpu;
-
-	if (!static_branch_likely(&sched_smt_present))
-		return -1;
-
-	if (!test_idle_cores(target, false))
-		return -1;
-
-	cpumask_and(cpus, sched_domain_span(sd), &p->cpus_allowed);
-
-	for_each_cpu_wrap(core, cpus, target) {
-		bool idle = true;
-
-		for_each_cpu(cpu, cpu_smt_mask(core)) {
-			cpumask_clear_cpu(cpu, cpus);
-			if (!idle_cpu(cpu))
-				idle = false;
-		}
-
-		if (idle)
-			return core;
-	}
-
-	/*
-	 * Failed to find an idle core; stop looking for one.
-	 */
-	set_idle_cores(target, 0);
-
-	return -1;
-}
-
 /*
  * Scan the local SMT mask for idle CPUs.
  */
@@ -6348,11 +6260,6 @@ static int select_idle_smt(struct task_struct *p, struct sched_domain *sd, int t
 }
 
 #else /* CONFIG_SCHED_SMT */
-
-static inline int select_idle_core(struct task_struct *p, struct sched_domain *sd, int target)
-{
-	return -1;
-}
 
 static inline int select_idle_smt(struct task_struct *p, struct sched_domain *sd, int target)
 {
@@ -6450,10 +6357,6 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	sd = rcu_dereference(per_cpu(sd_llc, target));
 	if (!sd)
 		return target;
-
-	i = select_idle_core(p, sd, target);
-	if ((unsigned)i < nr_cpumask_bits)
-		return i;
 
 	i = select_idle_cpu(p, sd, target);
 	if ((unsigned)i < nr_cpumask_bits)
